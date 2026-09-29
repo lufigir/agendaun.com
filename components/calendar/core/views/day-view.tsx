@@ -13,6 +13,7 @@ import {
 } from "date-fns"
 import { es } from "date-fns/locale"
 import { Plus } from "lucide-react"
+import { useCallback, useMemo } from "react"
 
 import {
   EndHour,
@@ -47,6 +48,9 @@ interface PositionedEvent {
   zIndex: number
 }
 
+// Quarter hour intervals constant
+const QUARTER_HOURS = [0, 1, 2, 3] as const
+
 export function DayView({
   currentDate,
   events,
@@ -56,66 +60,69 @@ export function DayView({
   editable = false,
   canEdit = false,
 }: DayViewProps) {
-  const dayStart = startOfDay(currentDate)
-  const hours = eachHourOfInterval({
-    start: addHours(dayStart, StartHour),
-    end: addHours(dayStart, EndHour - 1),
-  })
-
-  const dayEvents = events
-    .filter((event) => {
-      const eventStart = new Date(event.start)
-      const eventEnd = new Date(event.end)
-      return (
-        isSameDay(currentDate, eventStart) ||
-        isSameDay(currentDate, eventEnd) ||
-        (currentDate > eventStart && currentDate < eventEnd)
-      )
+  // Memoize hours calculation
+  const { dayStart, hours } = useMemo(() => {
+    const dayStart = startOfDay(currentDate)
+    const hours = eachHourOfInterval({
+      start: addHours(dayStart, StartHour),
+      end: addHours(dayStart, EndHour - 1),
     })
-    .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime())
+    return { dayStart, hours }
+  }, [currentDate])
 
-  // Filter all-day events
-  const filteredAllDayEvents = dayEvents.filter((event) => {
-    // Include explicitly marked all-day events or multi-day events
-    return event.all_day || isMultiDayEvent(event)
-  })
-  const allDayEvents = sortEvents(filteredAllDayEvents)
+  // Memoize day events filtering and sorting
+  const { allDayEvents, timeEvents } = useMemo(() => {
+    const dayEvents = events
+      .filter((event) => {
+        const eventStart = new Date(event.start)
+        const eventEnd = new Date(event.end)
+        return (
+          isSameDay(currentDate, eventStart) ||
+          isSameDay(currentDate, eventEnd) ||
+          (currentDate > eventStart && currentDate < eventEnd)
+        )
+      })
+      .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime())
 
-  // Get only single-day time-based events
-  const timeEvents = dayEvents.filter((event) => {
-    // Exclude all-day events and multi-day events
-    return !event.all_day && !isMultiDayEvent(event)
-  })
+    const filteredAllDayEvents = dayEvents.filter(
+      (event) => event.all_day || isMultiDayEvent(event),
+    )
 
-  // Process events to calculate positions
-  const calculatePositionedEvents = (): PositionedEvent[] => {
+    const timeEvents = dayEvents.filter(
+      (event) => !event.all_day && !isMultiDayEvent(event),
+    )
+
+    return {
+      allDayEvents: sortEvents(filteredAllDayEvents),
+      timeEvents,
+    }
+  }, [events, currentDate])
+
+  // Memoize positioned events calculation
+  const positionedEvents = useMemo((): PositionedEvent[] => {
     const result: PositionedEvent[] = []
 
-    // Sort events by start time and duration
     const sortedEvents = [...timeEvents].sort((a, b) => {
       const aStart = new Date(a.start)
       const bStart = new Date(b.start)
       const aEnd = new Date(a.end)
       const bEnd = new Date(b.end)
 
-      // First sort by start time
       if (aStart < bStart) return -1
       if (aStart > bStart) return 1
 
-      // If start times are equal, sort by duration (longer events first)
       const aDuration = differenceInMinutes(aEnd, aStart)
       const bDuration = differenceInMinutes(bEnd, bStart)
       return bDuration - aDuration
     })
 
-    // Track columns for overlapping events
-    const columns: { event: CalendarEvents; end: Date }[][] = []
+    // Store pre-computed dates to avoid repeated Date constructor calls
+    const columns: { start: Date; end: Date }[][] = []
 
     sortedEvents.forEach((event) => {
       const eventStart = new Date(event.start)
       const eventEnd = new Date(event.end)
 
-      // Adjust start and end times if they're outside this day
       const adjustedStart = isSameDay(currentDate, eventStart)
         ? eventStart
         : dayStart
@@ -123,13 +130,11 @@ export function DayView({
         ? eventEnd
         : addHours(dayStart, 24)
 
-      // Calculate top position and height
       const startHour = getHours(adjustedStart) + getMinutes(adjustedStart) / 60
       const endHour = getHours(adjustedEnd) + getMinutes(adjustedEnd) / 60
       const top = (startHour - StartHour) * WeekCellsHeight
       const height = (endHour - startHour) * WeekCellsHeight
 
-      // Find a column for this event
       let columnIndex = 0
       let placed = false
 
@@ -142,7 +147,7 @@ export function DayView({
           const overlaps = col.some((c) =>
             areIntervalsOverlapping(
               { start: adjustedStart, end: adjustedEnd },
-              { start: new Date(c.event.start), end: new Date(c.event.end) },
+              { start: c.start, end: c.end },
             ),
           )
           if (!overlaps) {
@@ -153,12 +158,10 @@ export function DayView({
         }
       }
 
-      // Ensure column is initialized before pushing
       const currentColumn = columns[columnIndex] || []
       columns[columnIndex] = currentColumn
-      currentColumn.push({ event, end: adjustedEnd })
+      currentColumn.push({ start: adjustedStart, end: adjustedEnd })
 
-      // First column takes full width, others are indented by 10% and take 90% width
       const width = columnIndex === 0 ? 1 : 0.9
       const left = columnIndex === 0 ? 0 : columnIndex * 0.1
 
@@ -168,18 +171,21 @@ export function DayView({
         height,
         left,
         width,
-        zIndex: 10 + columnIndex, // Higher columns get higher z-index
+        zIndex: 10 + columnIndex,
       })
     })
 
     return result
-  }
-  const positionedEvents = calculatePositionedEvents()
+  }, [timeEvents, currentDate, dayStart])
 
-  const handleEventClick = (event: CalendarEvents, e: React.MouseEvent) => {
-    e.stopPropagation()
-    onEventSelect(event)
-  }
+  // Memoize event click handler
+  const handleEventClick = useCallback(
+    (event: CalendarEvents, e: React.MouseEvent) => {
+      e.stopPropagation()
+      onEventSelect(event)
+    },
+    [onEventSelect],
+  )
 
   const showAllDaySection = allDayEvents.length > 0
   const { currentTimePosition, currentTimeVisible } = useCurrentTimeIndicator(
@@ -286,7 +292,7 @@ export function DayView({
                 className="border-border/70 relative h-[var(--week-cells-height)] border-b last:border-b-0"
               >
                 {/* Quarter-hour intervals */}
-                {[0, 1, 2, 3].map((quarter) => {
+                {QUARTER_HOURS.map((quarter) => {
                   const quarterHourTime = hourValue + quarter * 0.25
                   return (
                     <DroppableCell

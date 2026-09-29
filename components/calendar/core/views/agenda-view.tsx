@@ -3,6 +3,7 @@
 import { addDays, format, isToday } from "date-fns"
 import { es } from "date-fns/locale"
 import { Calendar } from "lucide-react"
+import { useMemo, useCallback } from "react"
 
 import {
   Empty,
@@ -30,18 +31,37 @@ export function AgendaView({
   etiquettes,
   onEventSelect,
 }: AgendaViewProps) {
-  const days = Array.from({ length: AgendaDaysToShow }, (_, i) =>
-    addDays(new Date(currentDate), i),
+  // Memoize days array to avoid recalculation on re-renders
+  const days = useMemo(
+    () =>
+      Array.from({ length: AgendaDaysToShow }, (_, i) =>
+        addDays(new Date(currentDate), i),
+      ),
+    [currentDate],
   )
 
-  const handleEventClick = (event: CalendarEvents, e: React.MouseEvent) => {
-    e.stopPropagation()
-    onEventSelect(event)
-  }
+  // Memoize event click handler
+  const handleEventClick = useCallback(
+    (event: CalendarEvents, e: React.MouseEvent) => {
+      e.stopPropagation()
+      onEventSelect(event)
+    },
+    [onEventSelect],
+  )
+
+  // Pre-compute events for all days to avoid repeated filtering
+  const dayEventsMap = useMemo(() => {
+    const map = new Map<string, CalendarEvents[]>()
+    for (const day of days) {
+      map.set(day.toISOString(), getAgendaEventsForDay(events, day))
+    }
+    return map
+  }, [days, events])
 
   // Check if there are any days with events
-  const hasEvents = days.some(
-    (day) => getAgendaEventsForDay(events, day).length > 0,
+  const hasEvents = useMemo(
+    () => Array.from(dayEventsMap.values()).some((events) => events.length > 0),
+    [dayEventsMap],
   )
 
   return (
@@ -60,7 +80,7 @@ export function AgendaView({
         </Empty>
       ) : (
         days.map((day) => {
-          const dayEvents = getAgendaEventsForDay(events, day)
+          const dayEvents = dayEventsMap.get(day.toISOString()) ?? []
 
           if (dayEvents.length === 0) return null
 

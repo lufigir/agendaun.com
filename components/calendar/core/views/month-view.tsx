@@ -14,7 +14,7 @@ import {
 } from "date-fns"
 import { es } from "date-fns/locale"
 import { Plus } from "lucide-react"
-import React, { useEffect, useState } from "react"
+import React, { useCallback, useEffect, useMemo, useState } from "react"
 
 import {
   DefaultStartHour,
@@ -50,6 +50,22 @@ interface MonthViewProps {
   canEdit?: boolean
 }
 
+// Memoize weekdays outside component as it's static
+const WEEKDAYS = Array.from({ length: 7 }).map((_, i) => {
+  const date = addDays(startOfWeek(new Date(), { weekStartsOn: 1 }), i)
+  return format(date, "EEE", { locale: es })
+})
+
+// Type for pre-computed day events data
+interface DayEventsData {
+  dayEvents: CalendarEvents[]
+  spanningEvents: CalendarEvents[]
+  allDayEvents: CalendarEvents[]
+  allEvents: CalendarEvents[]
+  sortedAllDayEvents: CalendarEvents[]
+  sortedAllEvents: CalendarEvents[]
+}
+
 export function MonthView({
   currentDate,
   events,
@@ -59,20 +75,17 @@ export function MonthView({
   editable = false,
   canEdit = false,
 }: MonthViewProps) {
-  const monthStart = startOfMonth(currentDate)
-  const monthEnd = endOfMonth(monthStart)
-  const calendarStart = startOfWeek(monthStart, { weekStartsOn: 1 })
-  const calendarEnd = endOfWeek(monthEnd, { weekStartsOn: 1 })
-  const days = eachDayOfInterval({ start: calendarStart, end: calendarEnd })
+  // Memoize date calculations
+  const { days, weeks } = useMemo(() => {
+    const monthStart = startOfMonth(currentDate)
+    const monthEnd = endOfMonth(monthStart)
+    const calendarStart = startOfWeek(monthStart, { weekStartsOn: 1 })
+    const calendarEnd = endOfWeek(monthEnd, { weekStartsOn: 1 })
+    const days = eachDayOfInterval({ start: calendarStart, end: calendarEnd })
 
-  const weekdays = Array.from({ length: 7 }).map((_, i) => {
-    const date = addDays(startOfWeek(new Date(), { weekStartsOn: 1 }), i)
-    return format(date, "EEE", { locale: es })
-  })
-
-  const generateWeeks = () => {
-    const result = []
-    let week = []
+    // Generate weeks
+    const result: Date[][] = []
+    let week: Date[] = []
 
     for (let i = 0; i < days.length; i++) {
       week.push(days[i])
@@ -82,14 +95,40 @@ export function MonthView({
       }
     }
 
-    return result
-  }
-  const weeks = generateWeeks()
+    return { days, weeks: result }
+  }, [currentDate])
 
-  const handleEventClick = (event: CalendarEvents, e: React.MouseEvent) => {
-    e.stopPropagation()
-    onEventSelect(event)
-  }
+  // Memoize event click handler
+  const handleEventClick = useCallback(
+    (event: CalendarEvents, e: React.MouseEvent) => {
+      e.stopPropagation()
+      onEventSelect(event)
+    },
+    [onEventSelect],
+  )
+
+  // Pre-compute events data for all days
+  const dayEventsData = useMemo(() => {
+    const map = new Map<string, DayEventsData>()
+
+    for (const day of days) {
+      const dayEvents = getEventsForDay(events, day)
+      const spanningEvents = getSpanningEventsForDay(events, day)
+      const allDayEvents = [...spanningEvents, ...dayEvents]
+      const allEvents = getAllEventsForDay(events, day)
+
+      map.set(day.toISOString(), {
+        dayEvents,
+        spanningEvents,
+        allDayEvents,
+        allEvents,
+        sortedAllDayEvents: sortEvents(allDayEvents),
+        sortedAllEvents: sortEvents(allEvents),
+      })
+    }
+
+    return map
+  }, [days, events])
 
   const [isMounted, setIsMounted] = useState(false)
   const { contentRef, getVisibleEventCount } = useEventVisibility({
@@ -104,7 +143,7 @@ export function MonthView({
   return (
     <div data-slot="month-view" className="contents">
       <div className="border-border/70 grid grid-cols-7 border-y uppercase">
-        {weekdays.map((day) => (
+        {WEEKDAYS.map((day) => (
           <div
             key={day}
             className="text-muted-foreground/70 py-2 text-center text-xs"
@@ -122,15 +161,18 @@ export function MonthView({
             {week.map((day, dayIndex) => {
               if (!day) return null // Skip if day is undefined
 
-              const dayEvents = getEventsForDay(events, day)
-              const spanningEvents = getSpanningEventsForDay(events, day)
+              const dayData = dayEventsData.get(day.toISOString())
+              if (!dayData) return null
+
+              const {
+                allDayEvents,
+                allEvents,
+                sortedAllDayEvents,
+                sortedAllEvents,
+              } = dayData
+
               const isCurrentMonth = isSameMonth(day, currentDate)
               const cellId = `month-cell-${day.toISOString()}`
-              const allDayEvents: CalendarEvents[] = [
-                ...spanningEvents,
-                ...dayEvents,
-              ]
-              const allEvents = getAllEventsForDay(events, day)
 
               const isReferenceCell = weekIndex === 0 && dayIndex === 0
               const visibleCount = isMounted
@@ -175,7 +217,7 @@ export function MonthView({
                       ref={isReferenceCell ? contentRef : null}
                       className="min-h-[calc((var(--event-height)+var(--event-gap))*2)] sm:min-h-[calc((var(--event-height)+var(--event-gap))*3)] lg:min-h-[calc((var(--event-height)+var(--event-gap))*4)]"
                     >
-                      {sortEvents(allDayEvents).map((event, index) => {
+                      {sortedAllDayEvents.map((event, index) => {
                         const eventStart = new Date(event.start)
                         const eventEnd = new Date(event.end)
                         const isFirstDay = isSameDay(day, eventStart)
@@ -262,7 +304,7 @@ export function MonthView({
                                 {format(day, "EEE d", { locale: es })}
                               </div>
                               <div className="space-y-1">
-                                {sortEvents(allEvents).map((event) => {
+                                {sortedAllEvents.map((event) => {
                                   const eventStart = new Date(event.start)
                                   const eventEnd = new Date(event.end)
                                   const isFirstDay = isSameDay(day, eventStart)

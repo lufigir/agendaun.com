@@ -3,7 +3,7 @@
 import { addHours, eachHourOfInterval, format, startOfDay } from "date-fns"
 import { es } from "date-fns/locale"
 import { MapPin, Plus } from "lucide-react"
-import React from "react"
+import React, { useCallback, useMemo, memo } from "react"
 
 import { cn, getColor } from "@/lib/utils"
 
@@ -44,17 +44,17 @@ export function ScheduleView({
   editable = false,
   canEdit = false,
 }: ScheduleViewProps) {
-  // Usar las horas personalizadas del horario
+  // Use custom hours from schedule
   const startHour = schedule.start_hour ?? StartHour
   const endHour = schedule.end_hour ?? EndHour
 
-  const generateHours = () => {
+  // Memoize hours generation
+  const hours = useMemo(() => {
     const today = new Date()
     const dayStart = startOfDay(today)
 
-    // Si endHour <= startHour, el horario cruza medianoche
+    // If schedule crosses midnight
     if (endHour <= startHour) {
-      // Generar horas desde startHour hasta 23, luego de 0 hasta endHour-1
       const hoursBeforeMidnight = eachHourOfInterval({
         start: addHours(dayStart, startHour),
         end: addHours(dayStart, 23),
@@ -66,34 +66,31 @@ export function ScheduleView({
       return [...hoursBeforeMidnight, ...hoursAfterMidnight]
     }
 
-    // Horario normal (no cruza medianoche)
     return eachHourOfInterval({
       start: addHours(dayStart, startHour),
       end: addHours(dayStart, endHour - 1),
     })
-  }
-  const hours = generateHours()
+  }, [startHour, endHour])
 
-  // Process events for each day (0 = Monday, 6 = Sunday)
-  const calculateProcessedDayEvents = () => {
-    const result = Array.from({ length: 7 }, (_, dayIndex) => {
-      // Filter events for this day of the week (dayIndex: 0=Monday, 6=Sunday)
-      const dayEvents = events.filter((event) => {
-        const mondayFirstDay = dayIndex + 1 // Convertir 0=Monday a 1=Monday
-        return event.days_of_week.includes(mondayFirstDay)
-      })
+  // Memoize processed day events calculation
+  const processedDayEvents = useMemo(() => {
+    const scheduleEndHour = endHour <= startHour ? endHour + 24 : endHour
 
-      // Sort events by start time and duration
+    return Array.from({ length: 7 }, (_, dayIndex) => {
+      const mondayFirstDay = dayIndex + 1
+
+      const dayEvents = events.filter((event) =>
+        event.days_of_week.includes(mondayFirstDay),
+      )
+
       const sortedEvents = [...dayEvents].sort((a, b) => {
-        // Comparar hora de inicio
         const aStartMinutes = a.start_hour * 60 + a.start_minute
         const bStartMinutes = b.start_hour * 60 + b.start_minute
 
-        // First sort by start time
-        if (aStartMinutes < bStartMinutes) return -1
-        if (aStartMinutes > bStartMinutes) return 1
+        if (aStartMinutes !== bStartMinutes) {
+          return aStartMinutes - bStartMinutes
+        }
 
-        // If start times are equal, sort by duration (longer events first)
         const aDuration =
           a.end_hour * 60 + a.end_minute - (a.start_hour * 60 + a.start_minute)
         const bDuration =
@@ -101,27 +98,17 @@ export function ScheduleView({
         return bDuration - aDuration
       })
 
-      // Calculate positions for each event
       const positionedEvents: PositionedEvent[] = []
-
-      // Track columns for overlapping events
       const columns: { event: ScheduleEvents; endHour: number }[][] = []
 
       sortedEvents.forEach((event) => {
-        // Usar los campos de hora directamente
         let eventStartHour = event.start_hour + event.start_minute / 60
         let eventEndHour = event.end_hour + event.end_minute / 60
 
-        // Si el evento cruza medianoche (end < start), ajustar endHour
         if (eventEndHour < eventStartHour) {
           eventEndHour += 24
         }
 
-        // Si el horario cruza medianoche, ajustar el rango de comparación
-        const scheduleEndHour = endHour <= startHour ? endHour + 24 : endHour
-
-        // Skip events ONLY if they are completely outside our time range
-        // Para horarios que cruzan medianoche, también considerar eventos después de medianoche
         const isOutsideRange =
           endHour <= startHour
             ? eventEndHour <= startHour ||
@@ -131,23 +118,17 @@ export function ScheduleView({
 
         if (isOutsideRange) return
 
-        // Clamp to our time range to show only the visible portion
         const clampedStartHour = Math.max(eventStartHour, startHour)
         const clampedEndHour = Math.min(eventEndHour, scheduleEndHour)
 
-        // Calcular top considerando que el horario puede cruzar medianoche
-        // Si el evento está después de medianoche y el horario cruza medianoche,
-        // necesitamos calcular la distancia desde startHour considerando el wrap
         let adjustedStartForTop = clampedStartHour
         if (endHour <= startHour && clampedStartHour < startHour) {
-          // El evento está después de medianoche, ajustar para el cálculo
           adjustedStartForTop = clampedStartHour + 24
         }
 
         const top = (adjustedStartForTop - startHour) * WeekCellsHeight
         const height = (clampedEndHour - clampedStartHour) * WeekCellsHeight
 
-        // Find a column for this event
         let columnIndex = 0
         let placed = false
 
@@ -158,7 +139,6 @@ export function ScheduleView({
             placed = true
           } else {
             const overlaps = col.some((c) => {
-              // Calcular hora de inicio del evento en la columna
               const cStartHour = c.event.start_hour + c.event.start_minute / 60
               return clampedStartHour < c.endHour && clampedEndHour > cStartHour
             })
@@ -170,12 +150,10 @@ export function ScheduleView({
           }
         }
 
-        // Ensure column is initialized before pushing
         const currentColumn = columns[columnIndex] || []
         columns[columnIndex] = currentColumn
         currentColumn.push({ event, endHour: clampedEndHour })
 
-        // Calculate width and left position based on number of columns
         const totalColumns = Math.max(columns.length, 1)
         const width = 1 / totalColumns
         const left = columnIndex / totalColumns
@@ -192,15 +170,16 @@ export function ScheduleView({
 
       return positionedEvents
     })
+  }, [events, startHour, endHour])
 
-    return result
-  }
-  const processedDayEvents = calculateProcessedDayEvents()
-
-  const handleEventClick = (event: ScheduleEvents, e: React.MouseEvent) => {
-    e.stopPropagation()
-    onEventSelect?.(event)
-  }
+  // Memoize event click handler
+  const handleEventClick = useCallback(
+    (event: ScheduleEvents, e: React.MouseEvent) => {
+      e.stopPropagation()
+      onEventSelect?.(event)
+    },
+    [onEventSelect],
+  )
 
   return (
     <div
@@ -264,7 +243,7 @@ export function ScheduleView({
                 onClick={(e) => e.stopPropagation()}
               >
                 <div className="h-full w-full">
-                  <ScheduleEvents
+                  <ScheduleEventItem
                     event={positionedEvent.event}
                     onClick={(e) => handleEventClick(positionedEvent.event, e)}
                     height={positionedEvent.height}
@@ -330,25 +309,26 @@ export function ScheduleView({
   )
 }
 
-// Simple event component for schedule view
-interface ScheduleEventsProps {
+// Memoized event component for schedule view
+interface ScheduleEventItemProps {
   event: ScheduleEvents
   onClick: (e: React.MouseEvent) => void
   height: number
 }
 
-function ScheduleEvents({ event, onClick, height }: ScheduleEventsProps) {
-  // Usar los campos de hora directamente
+const ScheduleEventItem = memo(function ScheduleEventItem({
+  event,
+  onClick,
+  height,
+}: ScheduleEventItemProps) {
   const startHour = event.start_hour
   const startMinute = event.start_minute
   const endHour = event.end_hour
   const endMinute = event.end_minute
 
   const showTime = height >= MinEventHeight
-  // Show description if height is at least 80px (enough for title + time + description)
   const showDescription = height >= 80 && event.description
 
-  // Get color classes based on event color
   const colorClass = getColor(event.color)
 
   return (
@@ -387,4 +367,4 @@ function ScheduleEvents({ event, onClick, height }: ScheduleEventsProps) {
       </div>
     </div>
   )
-}
+})
